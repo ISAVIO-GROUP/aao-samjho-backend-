@@ -1,8 +1,4 @@
-// ═══════════════════════════════════════════════════════
-// Aao Samjho AI — Backend Server
-// Railway pe deploy karo
-// Kaam: API key secure store + 3-model AI fallback
-// ═══════════════════════════════════════════════════════
+
 require('dotenv').config();
 const express    = require('express');
 const cors       = require('cors');
