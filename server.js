@@ -1,4 +1,3 @@
-
 require('dotenv').config();
 const express    = require('express');
 const cors       = require('cors');
@@ -17,13 +16,7 @@ if(missing.length){ console.error('❌ Missing env vars:', missing.join(', ')); 
 // ── Middleware ─────────────────────────────────────────
 app.use(helmet());
 app.use(express.json({ limit: '20kb' }));
-app.use(cors({
-  origin: (origin, cb) => {
-    // Allow all origins for now — restrict to your Vercel URL in production
-    cb(null, true);
-  },
-  credentials: true,
-}));
+app.use(cors({ origin: '*', credentials: true }));
 
 // ── Rate limiting ──────────────────────────────────────
 app.use('/api/ai/',   rateLimit({ windowMs: 60*1000, max: 60,  message: { error: 'AI rate limit. 1 min baad try karo.' } }));
@@ -55,32 +48,39 @@ function requireAdmin(req,res,next){
   next();
 }
 
-// ── Supabase (service role — never exposed to frontend) ─
+// ── Supabase ───────────────────────────────────────────
 const { createClient } = require('@supabase/supabase-js');
 const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 console.log('✅ Supabase connected');
 
-// ── In-memory key cache (fast access) ──────────────────
-let cachedKey = process.env.GEMINI_API_KEY || null;
-
-async function getGeminiKey(){
-  // 1. Memory cache
-  if(cachedKey) return cachedKey;
-  // 2. Supabase settings table
-  try{
-    const { data } = await sb.from('settings').select('value').eq('key','api_key').limit(1);
-    if(data?.[0]?.value){ cachedKey = data[0].value; return cachedKey; }
-  }catch(e){ console.warn('Supabase key fetch failed:', e.message); }
-  return null;
-}
-
-// ── AI ENGINE — 3-model fallback ───────────────────────
+// ── 8 Gemini 2.0 Models (rotation ready) ──────────────
 const MODELS = [
   'gemini-2.0-flash',
   'gemini-2.0-flash-exp',
-  'gemini-2.5-flash-preview-05-20',
+  'gemini-2.0-pro',
+  'gemini-1.5-flash',
+  'gemini-1.5-flash-8b',
+  'gemini-1.5-pro',
+  'gemini-2.5-flash',
+  'gemini-2.5-pro',
 ];
 
+// ── Get active keys — Least-used first (round robin) ──
+async function getActiveKeys(){
+  try{
+    const { data } = await sb
+      .from('api_keys')
+      .select('*')
+      .eq('status', 'active')
+      .order('usage_count', { ascending: true });
+    return data || [];
+  }catch(e){
+    console.error('Failed to fetch keys:', e.message);
+    return [];
+  }
+}
+
+// ── Call Gemini with fallback ──────────────────────────
 async function callGemini(model, apiKey, system, messages){
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
   const contents = messages.map(m => ({
@@ -102,7 +102,7 @@ async function callGemini(model, apiKey, system, messages){
   if(d.error){
     const code = d.error.code || 0;
     const status = d.error.status || '';
-    // Quota/overload → try next model
+    // Quota/overload → try next
     if(code===429||code===503||status==='RESOURCE_EXHAUSTED'||status==='UNAVAILABLE'){
       throw new Error('QUOTA:' + d.error.message);
     }
@@ -113,79 +113,122 @@ async function callGemini(model, apiKey, system, messages){
   return { text, model };
 }
 
+// ── Smart AI Call with key rotation ────────────────────
 async function callAI(system, messages){
-  const apiKey = await getGeminiKey();
-  if(!apiKey) throw new Error('API key set nahi hai — Admin Panel mein key save karo');
+  const keys = await getActiveKeys();
+  if(!keys.length) throw new Error('Koi bhi API key active nahi hai — Admin Panel mein key add karo');
 
   let lastErr;
-  for(const model of MODELS){
-    try{
-      console.log(`[AI] Trying ${model}...`);
-      const r = await callGemini(model, apiKey, system, messages);
-      console.log(`[AI] ✅ ${model}`);
-      return r;
-    }catch(e){
-      console.warn(`[AI] ❌ ${model}: ${e.message}`);
-      lastErr = e;
-      // Only continue to next model on quota errors
-      if(!e.message.startsWith('QUOTA:')) throw e;
+
+  // Try each key × each model
+  for(const key of keys){
+    for(const model of MODELS){
+      try{
+        console.log(`[AI] Trying ${key.id.substring(0,8)}... with ${model}...`);
+        const r = await callGemini(model, key.api_key, system, messages);
+        
+        // Success — increment usage
+        await sb.from('api_keys')
+          .update({ usage_count: (key.usage_count || 0) + 1 })
+          .eq('id', key.id);
+        
+        console.log(`[AI] ✅ Success with ${model}`);
+        return r;
+      }catch(e){
+        console.warn(`[AI] ❌ ${model}: ${e.message}`);
+        lastErr = e;
+        // Only continue to next key on quota errors
+        if(!e.message.startsWith('QUOTA:')) break;
+      }
     }
   }
-  throw lastErr || new Error('Teeno models fail ho gaye');
+  throw lastErr || new Error('Sab keys fail ho gaye');
 }
 
-// ═══════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────
 // ROUTES
-// ═══════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────
 
-// ── Health check ───────────────────────────────────────
+// Health check
 app.get('/api/health', (req,res) => res.json({
   status: 'ok',
-  models: MODELS,
-  keyLoaded: !!cachedKey,
+  models: MODELS.length,
   time: new Date().toISOString(),
 }));
 
-// ── Get key (frontend getKey fallback) ─────────────────
-// Returns key only if valid admin token — NOT exposed to students
-app.get('/api/key', requireAdmin, async (req,res) => {
-  const key = await getGeminiKey();
-  if(!key) return res.status(404).json({error:'Key set nahi hai'});
-  res.json({ key });
+// Get keys (admin only)
+app.get('/api/keys', requireAdmin, async (req,res) => {
+  const keys = await getActiveKeys();
+  const masked = keys.map(k => ({
+    ...k,
+    api_key: k.api_key.substring(0,6) + '••••••••' + k.api_key.slice(-4)
+  }));
+  res.json({ keys: masked });
 });
 
-// ── Admin: Save new API key ────────────────────────────
-app.post('/api/admin/key', requireAdmin, async (req,res) => {
-  const { key } = req.body;
-  if(!key) return res.status(400).json({error:'Key required'});
+// Add key (admin only)
+app.post('/api/keys', requireAdmin, async (req,res) => {
+  const { model, api_key } = req.body;
+  if(!model || !api_key) return res.status(400).json({error:'Model aur key chahiye'});
+  if(!MODELS.includes(model)) return res.status(400).json({error:'Invalid model'});
 
-  // Update memory cache immediately
-  cachedKey = key;
-
-  // Save to Supabase
   try{
-    const { data } = await sb.from('settings').select('id').eq('key','api_key').limit(1);
-    if(data?.length){
-      await sb.from('settings').update({value:key}).eq('key','api_key');
-    }else{
-      await sb.from('settings').insert({key:'api_key', value:key});
-    }
-    console.log('[Admin] API key updated ✅');
-    res.json({success:true, message:'Key saved aur turant active ho gayi!'});
+    const { data, error } = await sb
+      .from('api_keys')
+      .insert([{ provider:'gemini', model, api_key, status:'active' }])
+      .select();
+    if(error) throw error;
+    res.status(201).json({ success:true, key:data[0] });
   }catch(e){
     res.status(500).json({error: e.message});
   }
 });
 
-// ── Auth: Admin Login ──────────────────────────────────
+// Toggle key status (admin only)
+app.post('/api/keys/:id/toggle', requireAdmin, async (req,res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+  if(!['active','inactive'].includes(status)) return res.status(400).json({error:'Invalid status'});
+
+  try{
+    await sb.from('api_keys').update({ status }).eq('id', id);
+    res.json({ success:true });
+  }catch(e){
+    res.status(500).json({error: e.message});
+  }
+});
+
+// Reset key usage (admin only)
+app.post('/api/keys/:id/reset', requireAdmin, async (req,res) => {
+  const { id } = req.params;
+  try{
+    await sb.from('api_keys').update({ usage_count:0 }).eq('id', id);
+    res.json({ success:true });
+  }catch(e){
+    res.status(500).json({error: e.message});
+  }
+});
+
+// Delete key (admin only)
+app.delete('/api/keys/:id', requireAdmin, async (req,res) => {
+  const { id } = req.params;
+  try{
+    await sb.from('api_keys').delete().eq('id', id);
+    res.json({ success:true });
+  }catch(e){
+    res.status(500).json({error: e.message});
+  }
+});
+
+// Admin Login
 app.post('/api/auth/login', async (req,res) => {
   const { email, password } = req.body;
   if(!email||!password) return res.status(400).json({error:'Email aur password chahiye'});
 
   if(email===process.env.ADMIN_EMAIL && password===process.env.ADMIN_PASS){
     return res.json({
-      token: signToken({email, role:'admin', name:'Avi Jaiswal'}),
-      user: {name:'Avi Jaiswal', email, role:'admin', avatar:'AJ'},
+      token: signToken({email, role:'admin', name:'Admin'}),
+      user: {name:'Admin', email, role:'admin'},
     });
   }
 
@@ -196,7 +239,7 @@ app.post('/api/auth/login', async (req,res) => {
     if(u && u.pass===password){
       return res.json({
         token: signToken({email:u.email||u.phone, role:u.role||'student', name:u.name}),
-        user: {name:u.name, email:u.email, phone:u.phone, role:u.role||'student', avatar:(u.name||'S')[0].toUpperCase(), class:u.class, board:u.board},
+        user: {name:u.name, email:u.email, phone:u.phone, role:u.role||'student', class:u.class},
       });
     }
   }catch(e){ console.error('Login error:', e.message); }
@@ -204,9 +247,8 @@ app.post('/api/auth/login', async (req,res) => {
   res.status(401).json({error:'Email/Password galat hai'});
 });
 
-// ── AI: Chat ───────────────────────────────────────────
+// Chat
 app.post('/api/ai/chat', async (req,res) => {
-  // Auth optional — if no token, still works (key fetched server-side)
   const { messages, system } = req.body;
   if(!messages?.length) return res.status(400).json({error:'Messages required'});
   try{
@@ -217,11 +259,11 @@ app.post('/api/ai/chat', async (req,res) => {
   }
 });
 
-// ── AI: Generate Notes ─────────────────────────────────
+// Generate Notes
 app.post('/api/ai/notes', async (req,res) => {
   const { subject, chapter, classNum, board } = req.body;
   if(!subject||!chapter) return res.status(400).json({error:'Subject aur chapter required'});
-  const sys = `Tu expert ${subject} teacher hai. Class ${classNum||10} ${board||'CBSE'} ke liye Hinglish mein comprehensive notes banao. Markdown use karo.`;
+  const sys = `Tu expert ${subject} teacher hai. Class ${classNum||10} ${board||'CBSE'} ke liye Hinglish mein comprehensive notes banao.`;
   const msgs = [{role:'user', content:`"${chapter}" ke detailed notes banao.`}];
   try{
     const r = await callAI(sys, msgs);
@@ -231,32 +273,33 @@ app.post('/api/ai/notes', async (req,res) => {
   }
 });
 
-// ── AI: Generate Test ──────────────────────────────────
+// Generate Test
 app.post('/api/ai/test', async (req,res) => {
   const { subject, chapter, classNum, board, count=10 } = req.body;
   if(!subject||!chapter) return res.status(400).json({error:'Subject aur chapter required'});
-  const sys = `Generate exactly ${count} MCQ questions for Class ${classNum||10} ${board||'CBSE'} ${subject} — "${chapter}". Reply ONLY with valid JSON array: [{"q":"?","options":["A) ","B) ","C) ","D) "],"answer":"A","explanation":"Hinglish mein"}]`;
-  const msgs = [{role:'user', content:'Generate questions now.'}];
+  const sys = `Generate exactly ${count} MCQ questions for Class ${classNum||10} ${board||'CBSE'} ${subject} — "${chapter}". Reply ONLY with valid JSON: [{"q":"?","options":["A) ","B) ","C) ","D) "],"answer":"A"}]`;
+  const msgs = [{role:'user', content:'Generate now.'}];
   try{
     const r = await callAI(sys, msgs);
     const match = r.text.match(/\[[\s\S]*\]/);
-    if(!match) throw new Error('Invalid JSON from AI');
+    if(!match) throw new Error('Invalid JSON');
     res.json({ questions: JSON.parse(match[0]), model: r.model });
   }catch(e){
     res.status(503).json({error: e.message});
   }
 });
 
-// ── 404 ────────────────────────────────────────────────
+// 404
 app.use('/api/*', (req,res) => res.status(404).json({error:'Route not found'}));
 
-// ── Start ───────────────────────────────────────────────
+// Start
 app.listen(PORT, () => {
   console.log(`
-╔══════════════════════════════════════════╗
-║   🎓 Aao Samjho AI — Backend            ║
-║   Port   : ${PORT}                          ║
-║   Models : 2.0-flash → 2.0-exp → 2.5   ║
-║   Admin  : ${process.env.ADMIN_EMAIL}  ║
-╚══════════════════════════════════════════╝`);
+╔════════════════════════════════════════╗
+║ 🎓 Aao Samjho AI — Backend v2         ║
+║ Port     : ${PORT}                       ║
+║ Models   : 8 Gemini versions           ║
+║ Rotation : Least-used first            ║
+║ Admin    : ${process.env.ADMIN_EMAIL}   ║
+╚════════════════════════════════════════╝`);
 });
