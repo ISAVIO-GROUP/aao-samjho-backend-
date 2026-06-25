@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "functions": {
+    "api/**/*.js": {
+      "memory": 256,
+      "maxDuration": 30
+    }
+  },
+  "rewrites": [
+    { "source": "/api/keys/:id/toggle", "destination": "/api/keys/[id]/toggle" },
+    { "source": "/api/keys/:id/reset",  "destination": "/api/keys/[id]/reset"  },
+    { "source": "/api/keys/:id",        "destination": "/api/keys/[id]/index"  }
+  ]
+}

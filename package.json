@@ -1,0 +1,14 @@
+{
+  "name": "aao-samjho-backend",
+  "version": "2.0.0",
+  "main": "api/health.js",
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.38.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
