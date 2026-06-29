@@ -1,7 +1,13 @@
 const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 
-// ── CORS headers ───────────────────────────────────────
+// ── Supabase ───────────────────────────────────────────
+const sb = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
+
+// ── CORS helper ────────────────────────────────────────
 const ALLOWED_ORIGINS = [
   'https://aao-samjho-app.vercel.app',
   'http://localhost:3000',
@@ -14,21 +20,12 @@ function setCors(req, res) {
   if (ALLOWED_ORIGINS.includes(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
   }
-  res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
 }
 
-function handleCors(req, res) {
-  setCors(req, res);
-  if (req.method === 'OPTIONS') {
-    res.status(200).end();
-    return true; // caller should return
-  }
-  return false;
-}
-
-// ── JWT ────────────────────────────────────────────────
+// ── JWT helpers ────────────────────────────────────────
 const SECRET = process.env.JWT_SECRET;
 
 function signToken(payload) {
@@ -36,7 +33,7 @@ function signToken(payload) {
   const b = Buffer.from(JSON.stringify({
     ...payload,
     iat: Date.now(),
-    exp: Date.now() + 8 * 60 * 60 * 1000,
+    exp: Date.now() + 8 * 60 * 60 * 1000, // 8 hours
   })).toString('base64url');
   const s = crypto.createHmac('sha256', SECRET).update(`${h}.${b}`).digest('base64url');
   return `${h}.${b}.${s}`;
@@ -60,13 +57,6 @@ function getAdminFromToken(req) {
   return p;
 }
 
-// ── Supabase client (singleton-ish per cold start) ────
-let _sb;
-function getSb() {
-  if (!_sb) _sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
-  return _sb;
-}
-
 // ── Admin list from env ────────────────────────────────
 function getAdmins() {
   const admins = [];
@@ -82,11 +72,10 @@ function getAdmins() {
   return admins;
 }
 
-// ── Gemini models & AI call ────────────────────────────
+// ── Gemini Models ──────────────────────────────────────
 const MODELS = [
   'gemini-2.0-flash',
   'gemini-2.0-flash-exp',
-  'gemini-2.0-pro',
   'gemini-1.5-flash',
   'gemini-1.5-flash-8b',
   'gemini-1.5-pro',
@@ -96,7 +85,7 @@ const MODELS = [
 
 async function getActiveKeys() {
   try {
-    const { data } = await getSb()
+    const { data } = await sb
       .from('api_keys')
       .select('*')
       .eq('status', 'active')
@@ -142,15 +131,12 @@ async function callGemini(model, apiKey, system, messages) {
 async function callAI(system, messages) {
   const keys = await getActiveKeys();
   if (!keys.length) throw new Error('Koi bhi API key active nahi — Admin Panel mein key add karo');
-
   let lastErr;
   for (const key of keys) {
     for (const model of MODELS) {
       try {
         const r = await callGemini(model, key.api_key, system, messages);
-        await getSb().from('api_keys')
-          .update({ usage_count: (key.usage_count || 0) + 1 })
-          .eq('id', key.id);
+        await sb.from('api_keys').update({ usage_count: (key.usage_count || 0) + 1 }).eq('id', key.id);
         return r;
       } catch (e) {
         lastErr = e;
@@ -161,4 +147,4 @@ async function callAI(system, messages) {
   throw lastErr || new Error('Sab keys fail ho gaye');
 }
 
-module.exports = { handleCors, setCors, signToken, verifyToken, getAdminFromToken, getSb, getAdmins, callAI, MODELS };
+module.exports = { sb, setCors, signToken, verifyToken, getAdminFromToken, getAdmins, callAI, MODELS };
