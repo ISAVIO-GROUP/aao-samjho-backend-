@@ -1,25 +1,26 @@
-const { handleCors, signToken, getAdmins, getSb } = require('../_lib/helpers');
+const { sb, setCors, signToken, getAdmins } = require('../../lib/utils');
 
-module.exports = async function handler(req, res) {
-  if (handleCors(req, res)) return;
+export default async function handler(req, res) {
+  setCors(req, res);
+  if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  const { email, password } = req.body;
+  const { email, password } = req.body || {};
   if (!email || !password) return res.status(400).json({ error: 'Email aur password chahiye' });
 
-  // 1. Check admin list (from env)
+  // 1. Check admins from env
   const admins = getAdmins();
   const adminMatch = admins.find(a => a.email === email && a.pass === password);
   if (adminMatch) {
     return res.json({
       token: signToken({ email, role: 'admin', name: adminMatch.name }),
-      user:  { name: adminMatch.name, email, role: 'admin' },
+      user: { name: adminMatch.name, email, role: 'admin' },
     });
   }
 
-  // 2. Check Supabase students table
+  // 2. Check Supabase students
   try {
-    const { data } = await getSb()
+    const { data } = await sb
       .from('students')
       .select('*')
       .or(`email.eq.${email},phone.eq.${email}`)
@@ -28,12 +29,13 @@ module.exports = async function handler(req, res) {
     if (u && u.pass === password) {
       return res.json({
         token: signToken({ email: u.email || u.phone, role: u.role || 'student', name: u.name }),
-        user:  { name: u.name, email: u.email, phone: u.phone, role: u.role || 'student', class: u.class, board: u.board },
+        user: { name: u.name, email: u.email, phone: u.phone, role: u.role || 'student', class: u.class, board: u.board },
       });
     }
   } catch (e) {
-    console.error('[Auth] Supabase error:', e.message);
+    console.error('Supabase error:', e.message);
   }
 
   res.status(401).json({ error: 'Email ya password galat hai' });
-};
+}
+
