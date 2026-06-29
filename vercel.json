@@ -2,13 +2,19 @@
   "version": 2,
   "functions": {
     "api/**/*.js": {
-      "memory": 256,
       "maxDuration": 30
     }
   },
   "rewrites": [
-    { "source": "/api/keys/:id/toggle", "destination": "/api/keys/[id]/toggle" },
-    { "source": "/api/keys/:id/reset",  "destination": "/api/keys/[id]/reset"  },
-    { "source": "/api/keys/:id",        "destination": "/api/keys/[id]/index"  }
+    { "source": "/api/auth/login",       "destination": "/api/auth/login" },
+    { "source": "/api/auth/verify",      "destination": "/api/auth/verify" },
+    { "source": "/api/ai/chat",          "destination": "/api/ai/chat" },
+    { "source": "/api/ai/notes",         "destination": "/api/ai/notes" },
+    { "source": "/api/ai/test",          "destination": "/api/ai/test" },
+    { "source": "/api/keys",             "destination": "/api/keys/index" },
+    { "source": "/api/keys/:id",         "destination": "/api/keys/[id]" },
+    { "source": "/api/keys/:id/toggle",  "destination": "/api/keys/[id]" },
+    { "source": "/api/keys/:id/reset",   "destination": "/api/keys/[id]" },
+    { "source": "/api/health",           "destination": "/api/health" }
   ]
 }
