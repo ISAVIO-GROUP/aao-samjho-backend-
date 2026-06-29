@@ -1,18 +1,19 @@
-const { handleCors, getAdminFromToken, getSb, MODELS } = require('../_lib/helpers');
+const { sb, setCors, getAdminFromToken, MODELS } = require('../../lib/utils');
 
-module.exports = async function handler(req, res) {
-  if (handleCors(req, res)) return;
+export default async function handler(req, res) {
+  setCors(req, res);
+  if (req.method === 'OPTIONS') return res.status(200).end();
 
+  // All key routes require admin
   const admin = getAdminFromToken(req);
   if (!admin) return res.status(403).json({ error: 'Admin only' });
 
-  // GET /api/keys — list keys (masked)
+  // GET /api/keys — list all keys
   if (req.method === 'GET') {
     try {
-      const { data } = await getSb()
+      const { data } = await sb
         .from('api_keys')
         .select('*')
-        .eq('status', 'active')
         .order('usage_count', { ascending: true });
       const masked = (data || []).map(k => ({
         ...k,
@@ -26,11 +27,11 @@ module.exports = async function handler(req, res) {
 
   // POST /api/keys — add new key
   if (req.method === 'POST') {
-    const { model, api_key } = req.body;
+    const { model, api_key } = req.body || {};
     if (!model || !api_key) return res.status(400).json({ error: 'Model aur key chahiye' });
     if (!MODELS.includes(model)) return res.status(400).json({ error: 'Invalid model: ' + model });
     try {
-      const { data, error } = await getSb()
+      const { data, error } = await sb
         .from('api_keys')
         .insert([{ provider: 'gemini', model, api_key, status: 'active', usage_count: 0 }])
         .select();
@@ -42,4 +43,5 @@ module.exports = async function handler(req, res) {
   }
 
   res.status(405).json({ error: 'Method not allowed' });
-};
+}
+
