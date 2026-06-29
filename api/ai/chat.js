@@ -1,10 +1,11 @@
-const { handleCors, callAI } = require('../_lib/helpers');
+const { setCors, callAI } = require('../../lib/utils');
 
-module.exports = async function handler(req, res) {
-  if (handleCors(req, res)) return;
+export default async function handler(req, res) {
+  setCors(req, res);
+  if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  const { messages, system } = req.body;
+  const { messages, system } = req.body || {};
   if (!messages?.length) return res.status(400).json({ error: 'Messages required' });
 
   try {
@@ -13,4 +14,4 @@ module.exports = async function handler(req, res) {
   } catch (e) {
     res.status(503).json({ error: e.message });
   }
-};
+}
